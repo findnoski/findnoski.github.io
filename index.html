@@ -1,0 +1,366 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <title>найти второй носок</title>
+    <style>
+        body {
+            font-family: "Times New Roman", serif;
+            text-align: left;
+            padding: 20px;
+            background-color: white;
+            max-width: 800px;
+            margin: 0 auto;
+        }
+        #sock-status {
+            font-size: 24px;
+            margin-bottom: 20px;
+        }
+        #score {
+            font-size: 20px;
+            margin-bottom: 20px;
+        }
+        #leaderboard {
+            margin-top: 40px;
+            border-top: 1px solid #ccc;
+            padding-top: 20px;
+        }
+        #leaderboard h2 {
+            margin-bottom: 10px;
+        }
+        #leaderboard-table {
+            width: 100%;
+            border-collapse: collapse;
+        }
+        #leaderboard-table th, #leaderboard-table td {
+            padding: 8px;
+            text-align: left;
+            border-bottom: 1px solid #ddd;
+        }
+        #nickname-form {
+            margin-top: 20px;
+        }
+        #nickname-input {
+            padding: 8px;
+            width: 200px;
+            max-width: 100%;
+        }
+        #submit-nickname {
+            padding: 8px 16px;
+            margin-left: 10px;
+        }
+        .hidden {
+            display: none;
+        }
+        .error-message {
+            color: red;
+            margin-top: 5px;
+        }
+        #welcome-screen {
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background-color: white;
+            display: flex;
+            flex-direction: column;
+            justify-content: center;
+            align-items: center;
+            z-index: 1000;
+            text-align: center;
+            padding: 20px;
+        }
+        #welcome-screen p {
+            font-size: 24px;
+            margin-bottom: 30px;
+        }
+        #start-button {
+            padding: 10px 20px;
+            font-size: 18px;
+            cursor: pointer;
+        }
+    </style>
+</head>
+<body>
+    <div id="welcome-screen">
+        <p>этот сайт создан для мобильных устройств, чтобы найти носок нужно передвигаться в пространстве</p>
+        <button id="start-button">ок</button>
+    </div>
+
+    <div id="game-content" class="hidden">
+        <div id="sock-status">ищем носок...</div>
+        <div id="score">найдено носков: 0</div>
+
+        <div id="leaderboard">
+            <h2>таблица лидеров</h2>
+            <table id="leaderboard-table">
+                <thead>
+                    <tr>
+                        <th>место</th>
+                        <th>псевдоним</th>
+                        <th>найдено вторых носков</th>
+                    </tr>
+                </thead>
+                <tbody id="leaderboard-body">
+    
+                </tbody>
+            </table>
+            
+            <div id="nickname-form" class="hidden">
+                <p>поздравляем! вы нашли второй носок</p>
+                <input type="text" id="nickname-input" placeholder="введите ваш псевдоним" maxlength="64">
+                <button id="submit-nickname">сохранить результат</button>
+                <div id="nickname-error" class="error-message hidden">псевдоним занят</div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+
+        const MESSAGES = [
+            "не удаётся найти второй носок",
+            "второй носок очень далеко",
+            "второй носок далеко",
+            "второй носок не очень далеко",
+            "второй носок уже близко",
+            "второй носок очень близко",
+            "вот он, второй носок!"
+        ];
+        
+        const PRECISION_FACTOR = 1000000;
+        const LEADERBOARD_UPDATE_INTERVAL = 10000;
+        
+        let lastPosition = null;
+        let positionCount = 0;
+        let score = 0;
+        let currentNickname = localStorage.getItem('sockNickname') || null;
+        let foundSock = false;
+        let leaderboard = [];
+        let geoWatchId = null;
+        let leaderboardUpdateInterval = null;
+
+        const elements = {
+            welcomeScreen: document.getElementById('welcome-screen'),
+            gameContent: document.getElementById('game-content'),
+            sockStatus: document.getElementById('sock-status'),
+            scoreDisplay: document.getElementById('score'),
+            leaderboardBody: document.getElementById('leaderboard-body'),
+            nicknameForm: document.getElementById('nickname-form'),
+            nicknameInput: document.getElementById('nickname-input'),
+            submitNickname: document.getElementById('submit-nickname'),
+            nicknameError: document.getElementById('nickname-error'),
+            startButton: document.getElementById('start-button')
+        };
+
+        function initGame() {
+
+            score = parseInt(localStorage.getItem('sockScore')) || 0;
+            leaderboard = JSON.parse(localStorage.getItem('sockLeaderboard')) || [];
+            
+  
+            updateScore();
+            updateLeaderboard();
+            
+            startLeaderboardUpdates();
+
+            if (currentNickname) {
+                elements.nicknameForm.classList.add('hidden');
+            }
+
+            if (localStorage.getItem('visitedBefore') && navigator.geolocation) {
+                startGeoWatch();
+            }
+        }
+
+        function updateScore() {
+            elements.scoreDisplay.textContent = `найдено вторых носков: ${score}`;
+            localStorage.setItem('sockScore', score.toString());
+        }
+
+
+        function updateLeaderboard() {
+            elements.leaderboardBody.innerHTML = '';
+            
+
+            const sortedLeaderboard = [...leaderboard].sort((a, b) => b.score - a.score);
+
+            sortedLeaderboard.slice(0, 10).forEach((player, index) => {
+                const row = document.createElement('tr');
+                row.innerHTML = `
+                    <td>${index + 1}</td>
+                    <td>${player.nickname}</td>
+                    <td>${player.score}</td>
+                `;
+                elements.leaderboardBody.appendChild(row);
+            });
+        }
+
+        function isNicknameTaken(nickname) {
+            return leaderboard.some(player => 
+                player.nickname.toLowerCase() === nickname.toLowerCase()
+            );
+        }
+
+        function updateSockStatus(position) {
+            const lat = position.coords.latitude;
+            const lon = position.coords.longitude;
+            
+            const latPrecise = Math.round(lat * PRECISION_FACTOR);
+            const lonPrecise = Math.round(lon * PRECISION_FACTOR);
+            
+            const seed = latPrecise + lonPrecise + positionCount;
+            const index = Math.abs(seed) % MESSAGES.length;
+            
+            const message = MESSAGES[index];
+            elements.sockStatus.textContent = message;
+            
+
+            if (message === "вот он, второй носок!" && !foundSock) {
+                handleSockFound();
+            }
+            
+            positionCount++;
+        }
+
+
+        function handleSockFound() {
+            foundSock = true;
+            score++;
+            updateScore();
+            
+  
+            if (currentNickname) {
+                updatePlayerScore(currentNickname, score);
+            } else {
+
+                elements.nicknameForm.classList.remove('hidden');
+            }
+  
+            setTimeout(() => {
+                foundSock = false;
+                elements.sockStatus.textContent = "ищем носок...";
+            }, 1000);
+        }
+
+        function updatePlayerScore(nickname, newScore) {
+            const playerIndex = leaderboard.findIndex(p => p.nickname === nickname);
+            
+            if (playerIndex !== -1) {
+
+                leaderboard[playerIndex].score = newScore;
+            } else {
+           
+                leaderboard.push({
+                    nickname: nickname,
+                    score: newScore
+                });
+            }
+  
+            saveLeaderboard();
+            updateLeaderboard();
+        }
+
+        function saveLeaderboard() {
+            localStorage.setItem('sockLeaderboard', JSON.stringify(leaderboard));
+        }
+
+        function startLeaderboardUpdates() {
+
+            updateLeaderboard();
+    
+            leaderboardUpdateInterval = setInterval(() => {
+                updateLeaderboard();
+            }, LEADERBOARD_UPDATE_INTERVAL);
+        }
+
+        function startGeoWatch() {
+            if (navigator.geolocation) {
+                const options = {
+                    enableHighAccuracy: true,
+                    maximumAge: 0,
+                    timeout: 5000
+                };
+                
+                geoWatchId = navigator.geolocation.watchPosition(
+                    position => {
+                        if (!lastPosition || 
+                            Math.abs(lastPosition.coords.latitude - position.coords.latitude) > 0.00001 || 
+                            Math.abs(lastPosition.coords.longitude - position.coords.longitude) > 0.00001) {
+                            
+                            lastPosition = position;
+                            if (!foundSock) {
+                                updateSockStatus(position);
+                            }
+                        }
+                    },
+                    () => {
+                        elements.sockStatus.textContent = "включите геолокацию";
+                    },
+                    options
+                );
+            } else {
+                elements.sockStatus.textContent = "плохой браузер";
+            }
+        }
+
+        function setupEventListeners() {
+            elements.startButton.addEventListener('click', () => {
+                elements.welcomeScreen.style.display = 'none';
+                elements.gameContent.classList.remove('hidden');
+                localStorage.setItem('visitedBefore', 'true');
+                
+                if (!geoWatchId && navigator.geolocation) {
+                    startGeoWatch();
+                }
+            });
+
+            elements.submitNickname.addEventListener('click', () => {
+                const nickname = elements.nicknameInput.value.trim();
+                
+               
+                elements.nicknameError.classList.add('hidden');
+                
+                if (nickname.length > 0) {
+                   
+                    if (isNicknameTaken(nickname)) {
+                        elements.nicknameError.classList.remove('hidden');
+                        return;
+                    }
+                    
+                   
+                    currentNickname = nickname;
+                    localStorage.setItem('sockNickname', nickname);
+                   
+                    updatePlayerScore(nickname, score);
+           
+                    elements.nicknameForm.classList.add('hidden');
+                    elements.nicknameInput.value = '';
+                }
+            });
+        }
+
+        function cleanup() {
+            if (leaderboardUpdateInterval) {
+                clearInterval(leaderboardUpdateInterval);
+            }
+            if (geoWatchId && navigator.geolocation) {
+                navigator.geolocation.clearWatch(geoWatchId);
+            }
+        }
+
+        window.addEventListener('DOMContentLoaded', () => {
+            setupEventListeners();
+    
+            if (localStorage.getItem('visitedBefore')) {
+                elements.welcomeScreen.style.display = 'none';
+                elements.gameContent.classList.remove('hidden');
+            }
+            
+            initGame();
+        });
+
+        window.addEventListener('beforeunload', cleanup);
+    </script>
+</body>
+</html>
