@@ -81,6 +81,8 @@
             cursor: pointer;
         }
     </style>
+    <script src="https://www.gstatic.com/firebasejs/9.6.0/firebase-app-compat.js"></script>
+    <script src="https://www.gstatic.com/firebasejs/9.6.0/firebase-database-compat.js"></script>
 </head>
 <body>
     <div id="welcome-screen">
@@ -102,9 +104,7 @@
                         <th>найдено вторых носков</th>
                     </tr>
                 </thead>
-                <tbody id="leaderboard-body">
-    
-                </tbody>
+                <tbody id="leaderboard-body"></tbody>
             </table>
             
             <div id="nickname-form" class="hidden">
@@ -117,6 +117,21 @@
     </div>
 
     <script>
+        // Конфигурация Firebase
+        const firebaseConfig = {
+            apiKey: "AIzaSyDfJqHHuWXJAIM0J_zxNmzIpYoZ4IaJnT0",
+            authDomain: "findnoski.firebaseapp.com",
+            databaseURL: "https://findnoski-default-rtdb.firebaseio.com",
+            projectId: "findnoski",
+            storageBucket: "findnoski.firebasestorage.app",
+            messagingSenderId: "77082821920",
+            appId: "1:77082821920:web:c2996326150847f2534345",
+            measurementId: "G-L6JSM14X1B"
+        };
+
+        // Инициализация Firebase
+        const app = firebase.initializeApp(firebaseConfig);
+        const database = firebase.database();
 
         const MESSAGES = [
             "не удаётся найти второй носок",
@@ -130,6 +145,7 @@
         
         const PRECISION_FACTOR = 1000000;
         const LEADERBOARD_UPDATE_INTERVAL = 10000;
+        const MIN_MOVEMENT_DISTANCE = 1; // 1 метр (изменено с 10)
         
         let lastPosition = null;
         let positionCount = 0;
@@ -139,6 +155,7 @@
         let leaderboard = [];
         let geoWatchId = null;
         let leaderboardUpdateInterval = null;
+        let lastMovementTime = 0;
 
         const elements = {
             welcomeScreen: document.getElementById('welcome-screen'),
@@ -153,14 +170,43 @@
             startButton: document.getElementById('start-button')
         };
 
-        function initGame() {
+        // Функция для вычисления расстояния между координатами (в метрах)
+        function calculateDistance(lat1, lon1, lat2, lon2) {
+            const R = 6371e3; // радиус Земли в метрах
+            const φ1 = lat1 * Math.PI/180;
+            const φ2 = lat2 * Math.PI/180;
+            const Δφ = (lat2-lat1) * Math.PI/180;
+            const Δλ = (lon2-lon1) * Math.PI/180;
 
+            const a = Math.sin(Δφ/2) * Math.sin(Δφ/2) +
+                      Math.cos(φ1) * Math.cos(φ2) *
+                      Math.sin(Δλ/2) * Math.sin(Δλ/2);
+            const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
+
+            return R * c;
+        }
+
+        // Функция для загрузки лидерборда из Firebase
+        function fetchLeaderboard() {
+            return new Promise((resolve) => {
+                const leaderboardRef = database.ref('leaderboard');
+                leaderboardRef.orderByChild('score').limitToLast(100).on('value', (snapshot) => {
+                    const data = snapshot.val();
+                    leaderboard = data ? Object.values(data) : [];
+                    leaderboard.sort((a, b) => b.score - a.score);
+                    updateLeaderboard();
+                    resolve(leaderboard);
+                }, (error) => {
+                    console.error("Ошибка загрузки лидерборда:", error);
+                    elements.sockStatus.textContent = "Ошибка загрузки таблицы";
+                });
+            });
+        }
+
+        function initGame() {
             score = parseInt(localStorage.getItem('sockScore')) || 0;
-            leaderboard = JSON.parse(localStorage.getItem('sockLeaderboard')) || [];
-            
-  
             updateScore();
-            updateLeaderboard();
+            fetchLeaderboard().catch(console.error);
             
             startLeaderboardUpdates();
 
@@ -178,14 +224,9 @@
             localStorage.setItem('sockScore', score.toString());
         }
 
-
         function updateLeaderboard() {
             elements.leaderboardBody.innerHTML = '';
-            
-
-            const sortedLeaderboard = [...leaderboard].sort((a, b) => b.score - a.score);
-
-            sortedLeaderboard.slice(0, 10).forEach((player, index) => {
+            leaderboard.slice(0, 10).forEach((player, index) => {
                 const row = document.createElement('tr');
                 row.innerHTML = `
                     <td>${index + 1}</td>
@@ -196,111 +237,117 @@
             });
         }
 
-        function isNicknameTaken(nickname) {
-            return leaderboard.some(player => 
-                player.nickname.toLowerCase() === nickname.toLowerCase()
-            );
-        }
-
         function updateSockStatus(position) {
+            const now = Date.now();
             const lat = position.coords.latitude;
             const lon = position.coords.longitude;
+            const accuracy = position.coords.accuracy || 50;
+            
+            if (lastPosition) {
+                const distance = calculateDistance(
+                    lastPosition.coords.latitude, 
+                    lastPosition.coords.longitude,
+                    lat,
+                    lon
+                );
+                
+                if (distance < MIN_MOVEMENT_DISTANCE || accuracy > 100) {
+                    if (now - lastMovementTime > 30000) {
+                        elements.sockStatus.textContent = "Двигайтесь дальше для поиска";
+                        return;
+                    }
+                } else {
+                    lastMovementTime = now;
+                }
+            } else {
+                lastMovementTime = now;
+            }
             
             const latPrecise = Math.round(lat * PRECISION_FACTOR);
             const lonPrecise = Math.round(lon * PRECISION_FACTOR);
-            
             const seed = latPrecise + lonPrecise + positionCount;
             const index = Math.abs(seed) % MESSAGES.length;
             
-            const message = MESSAGES[index];
-            elements.sockStatus.textContent = message;
+            elements.sockStatus.textContent = MESSAGES[index];
             
-
-            if (message === "вот он, второй носок!" && !foundSock) {
+            if (MESSAGES[index] === "вот он, второй носок!" && !foundSock) {
                 handleSockFound();
             }
             
+            lastPosition = position;
             positionCount++;
         }
 
-
-        function handleSockFound() {
+        async function handleSockFound() {
             foundSock = true;
             score++;
             updateScore();
             
-  
             if (currentNickname) {
-                updatePlayerScore(currentNickname, score);
+                try {
+                    await updatePlayerScore(currentNickname, score);
+                } catch (error) {
+                    console.error("Ошибка сохранения:", error);
+                }
             } else {
-
                 elements.nicknameForm.classList.remove('hidden');
             }
-  
+            
             setTimeout(() => {
                 foundSock = false;
                 elements.sockStatus.textContent = "ищем носок...";
             }, 1000);
         }
 
-        function updatePlayerScore(nickname, newScore) {
-            const playerIndex = leaderboard.findIndex(p => p.nickname === nickname);
-            
-            if (playerIndex !== -1) {
-
-                leaderboard[playerIndex].score = newScore;
-            } else {
-           
-                leaderboard.push({
-                    nickname: nickname,
-                    score: newScore
-                });
-            }
-  
-            saveLeaderboard();
-            updateLeaderboard();
-        }
-
-        function saveLeaderboard() {
-            localStorage.setItem('sockLeaderboard', JSON.stringify(leaderboard));
+        function updatePlayerScore(nickname, score) {
+            return new Promise((resolve, reject) => {
+                const leaderboardRef = database.ref('leaderboard');
+                
+                leaderboardRef.orderByChild('nickname').equalTo(nickname).once('value')
+                    .then(snapshot => {
+                        if (snapshot.exists()) {
+                            const playerData = snapshot.val();
+                            const playerId = Object.keys(playerData)[0];
+                            if (playerData[playerId].score < score) {
+                                leaderboardRef.child(playerId).update({ 
+                                    score: score,
+                                    timestamp: firebase.database.ServerValue.TIMESTAMP
+                                }).then(resolve).catch(reject);
+                            } else {
+                                resolve(false);
+                            }
+                        } else {
+                            leaderboardRef.push({
+                                nickname: nickname,
+                                score: score,
+                                timestamp: firebase.database.ServerValue.TIMESTAMP
+                            }).then(resolve).catch(reject);
+                        }
+                    })
+                    .catch(reject);
+            });
         }
 
         function startLeaderboardUpdates() {
-
-            updateLeaderboard();
-    
-            leaderboardUpdateInterval = setInterval(() => {
-                updateLeaderboard();
-            }, LEADERBOARD_UPDATE_INTERVAL);
+            fetchLeaderboard();
+            leaderboardUpdateInterval = setInterval(fetchLeaderboard, LEADERBOARD_UPDATE_INTERVAL);
         }
 
         function startGeoWatch() {
             if (navigator.geolocation) {
-                const options = {
-                    enableHighAccuracy: true,
-                    maximumAge: 0,
-                    timeout: 5000
-                };
-                
                 geoWatchId = navigator.geolocation.watchPosition(
-                    position => {
-                        if (!lastPosition || 
-                            Math.abs(lastPosition.coords.latitude - position.coords.latitude) > 0.00001 || 
-                            Math.abs(lastPosition.coords.longitude - position.coords.longitude) > 0.00001) {
-                            
-                            lastPosition = position;
-                            if (!foundSock) {
-                                updateSockStatus(position);
-                            }
+                    position => !foundSock && updateSockStatus(position),
+                    error => {
+                        let message = "Ошибка геолокации";
+                        if (error.code === error.PERMISSION_DENIED) {
+                            message = "Доступ к геолокации запрещен";
                         }
+                        elements.sockStatus.textContent = message;
                     },
-                    () => {
-                        elements.sockStatus.textContent = "включите геолокацию";
-                    },
-                    options
+                    { enableHighAccuracy: true, maximumAge: 0, timeout: 10000 }
                 );
             } else {
-                elements.sockStatus.textContent = "плохой браузер";
+                elements.sockStatus.textContent = "Геолокация не поддерживается";
             }
         }
 
@@ -309,54 +356,48 @@
                 elements.welcomeScreen.style.display = 'none';
                 elements.gameContent.classList.remove('hidden');
                 localStorage.setItem('visitedBefore', 'true');
-                
-                if (!geoWatchId && navigator.geolocation) {
-                    startGeoWatch();
-                }
+                if (!geoWatchId && navigator.geolocation) startGeoWatch();
             });
 
-            elements.submitNickname.addEventListener('click', () => {
+            elements.submitNickname.addEventListener('click', async () => {
                 const nickname = elements.nicknameInput.value.trim();
-                
-               
                 elements.nicknameError.classList.add('hidden');
                 
-                if (nickname.length > 0) {
-                   
-                    if (isNicknameTaken(nickname)) {
+                if (nickname.length < 2) {
+                    elements.nicknameError.textContent = "Минимум 2 символа";
+                    elements.nicknameError.classList.remove('hidden');
+                    return;
+                }
+                
+                try {
+                    const success = await updatePlayerScore(nickname, score);
+                    if (success) {
+                        currentNickname = nickname;
+                        localStorage.setItem('sockNickname', nickname);
+                        elements.nicknameForm.classList.add('hidden');
+                        elements.nicknameInput.value = '';
+                    } else {
+                        elements.nicknameError.textContent = "Ошибка сохранения";
                         elements.nicknameError.classList.remove('hidden');
-                        return;
                     }
-                    
-                   
-                    currentNickname = nickname;
-                    localStorage.setItem('sockNickname', nickname);
-                   
-                    updatePlayerScore(nickname, score);
-           
-                    elements.nicknameForm.classList.add('hidden');
-                    elements.nicknameInput.value = '';
+                } catch (error) {
+                    elements.nicknameError.textContent = "Псевдоним занят";
+                    elements.nicknameError.classList.remove('hidden');
                 }
             });
         }
 
         function cleanup() {
-            if (leaderboardUpdateInterval) {
-                clearInterval(leaderboardUpdateInterval);
-            }
-            if (geoWatchId && navigator.geolocation) {
-                navigator.geolocation.clearWatch(geoWatchId);
-            }
+            clearInterval(leaderboardUpdateInterval);
+            if (geoWatchId) navigator.geolocation.clearWatch(geoWatchId);
         }
 
         window.addEventListener('DOMContentLoaded', () => {
             setupEventListeners();
-    
             if (localStorage.getItem('visitedBefore')) {
                 elements.welcomeScreen.style.display = 'none';
                 elements.gameContent.classList.remove('hidden');
             }
-            
             initGame();
         });
 
